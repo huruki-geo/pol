@@ -1,7 +1,7 @@
 // src/app/api/timeline/[region]/route.ts
 
 import { type NextRequest, NextResponse } from 'next/server';
-
+export const runtime = 'edge';
 /**
  * Mastodon のステータス（トゥート）を表す型定義。
  * API レスポンスに合わせて調整してください。
