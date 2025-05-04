@@ -31,11 +31,13 @@ interface TimelineContext {
  * 指定された地域の Mastodon 公開タイムラインを取得する API ルートハンドラ (GET)。
  */
 export async function GET(
-  request: NextRequest,
-  context: TimelineContext
-) {
-  const region = context.params.region.toUpperCase();
-  console.log(`API Route requested region: ${region}`);
+    request: NextRequest,
+    // 2番目の引数の型注釈を削除し、分割代入で params を取り出す
+    { params }: { params: { region: string } }
+  ) {
+    // params.region でアクセスできる
+    const region = params.region.toUpperCase();
+    console.log(`API Route requested region: ${region}`);
 
   // --- 環境変数からリージョンごとのインスタンス設定 (JSON文字列) を取得 ---
   const regionsJsonString = process.env.REGIONS_JSON; // Cloudflare Pages ダッシュボードで設定
