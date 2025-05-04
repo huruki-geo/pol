@@ -1,7 +1,7 @@
 name = "pol" # あなたのプロジェクト名に合わせる
 # main = "src/index.ts" # Next.js連携の場合、Functionsを使うため不要なことが多い
 compatibility_date = "2023-11-21" # wrangler suggest-compat-date で推奨される日付を確認
-
+pages_build_output_dir = "./out" # Example for Next.js static export or other frameworks
 # KV Namespace Binding (重要: IDを自分のものに置き換える)
 [[kv_namespaces]]
 binding = "TIMELINE_CACHE"
