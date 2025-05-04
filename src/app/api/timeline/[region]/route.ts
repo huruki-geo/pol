@@ -1,173 +1,255 @@
 // src/app/api/timeline/[region]/route.ts
 
 import { type NextRequest, NextResponse } from 'next/server';
-export const runtime = 'edge';
+
+// --- 型定義 ---
+
+/**
+ * Cloudflare Pages Runtime で利用可能な環境変数とバインディングの型 (仮定)。
+ * 正確な型は Cloudflare のドキュメントや @cloudflare/workers-types を参照。
+ * process.env から取得する場合、型アサーションやチェックが必要になることが多い。
+ */
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      REGIONS_JSON?: string; // 環境変数 (JSON 文字列)
+      // Cloudflare ダッシュボードでバインドされたオブジェクトは process.env に直接入らない可能性が高い
+      // AI?: any; // Workers AI Binding (アクセス方法は要確認)
+      // TIMELINE_CACHE?: KVNamespace; // KV Binding (アクセス方法は要確認)
+    }
+  }
+  // Cloudflare Pages の Execution Context (もし KV や AI をここから使う場合)
+  // interface ExecutionContext {
+  //  env: {
+  //    AI: { run: (model: string, inputs: any) => Promise<any> }; // AI Binding の型 (仮)
+  //    TIMELINE_CACHE: KVNamespace; // KV Binding の型
+  //  };
+  //  waitUntil(promise: Promise<any>): void;
+  // }
+}
+
+
 /**
  * Mastodon のステータス（トゥート）を表す型定義。
- * API レスポンスに合わせて調整してください。
  */
 interface MastodonStatus {
     id: string;
-    created_at: string; // ISO 8601 形式の文字列
-    content: string;    // HTML 形式のコンテンツ文字列
-    url: string;        // Mastodon上の投稿へのURL
+    created_at: string;
+    content: string;
+    url: string;
     account: {
-        acct: string;   // ユーザーアカウント (例: user@instance.domain)
+        acct: string;
     };
-    instance_domain?: string; // どのインスタンスからの投稿かを示すドメイン (後で追加)
+    instance_domain?: string;
 }
 
 /**
- * Next.js App Router の Route Handler が受け取るコンテキストの型定義。
- * 動的ルートパラメータ `region` を含みます。
+ * Workers AI テキスト分類モデルの入力型 (仮)。
  */
-//interface TimelineContext {
-//  params: {
-//    region: string;
-//  }
-//}
+interface AiTextClassificationInput {
+    text: string;
+}
 
 /**
- * 指定された地域の Mastodon 公開タイムラインを取得する API ルートハンドラ (GET)。
+ * Workers AI テキスト分類モデルの出力型 (仮)。モデルにより異なる可能性あり。
  */
-export async function GET(
-    request: NextRequest,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    context: any // ★★★ 2番目の引数の型を一時的に 'any' にしてみる ★★★
-  ) {
-    // ★★★ context.params にアクセスする前に存在確認を追加 ★★★
-    if (!context || !context.params || typeof context.params.region !== 'string') {
-        console.error("Invalid context or params received:", context);
-        return NextResponse.json({ error: 'Invalid request context' }, { status: 400 });
-    }
-    const region = context.params.region.toUpperCase();
-    console.log(`API Route requested region: ${region}`);
+interface AiTextClassificationOutput {
+    label: string;
+    score: number;
+}
 
-  // --- 環境変数からリージョンごとのインスタンス設定 (JSON文字列) を取得 ---
-  const regionsJsonString = process.env.REGIONS_JSON; // Cloudflare Pages ダッシュボードで設定
+/**
+ * 感情分析の集計結果の型。
+ */
+interface SentimentAnalysisData {
+    positivePercentage: number;
+    negativePercentage: number;
+    neutralPercentage: number;
+    totalAnalyzed: number;
+    counts: { positive: number; negative: number; neutral: number };
+}
+
+/**
+ * API レスポンス全体の型。
+ */
+interface ApiResponse {
+    timeline: MastodonStatus[];
+    sentimentAnalysis: SentimentAnalysisData;
+}
+
+
+// --- ヘルパー関数 ---
+
+/**
+ * HTML タグを除去する簡単な関数。
+ */
+const stripHtml = (html: string): string => {
+    if (!html) return '';
+    let text = html.replace(/<p>/gi, ' ').replace(/<br\s*\/?>/gi, ' ');
+    text = text.replace(/<[^>]*>/g, '');
+    text = text.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, "'");
+    return text.replace(/\s+/g, ' ').trim();
+};
+
+// --- API ルートハンドラ ---
+
+export const runtime = 'edge'; // Edge Runtime で実行することを指定
+
+export async function GET(
+  request: NextRequest,
+  // context の型は Next.js + Cloudflare Pages Runtime の仕様に依存
+  // ここでは分割代入を使い、型チェックは内部で行う
+  { params }: { params: { region: string } }
+  // context?: ExecutionContext // 必要に応じて ExecutionContext を受け取る (要調査)
+) {
+  const region = params.region.toUpperCase();
+  console.log(`API Route requested region: ${region}`);
+
+  // --- 環境変数 (Regions JSON) の取得と検証 ---
+  const regionsJsonString = process.env.REGIONS_JSON;
   let regionConfig: Record<string, string> = {};
 
   if (typeof regionsJsonString !== 'string' || regionsJsonString === '') {
      console.error("Environment variable REGIONS_JSON is not set or empty.");
-     // 設定が見つからない場合はサーバーエラーを返す
      return NextResponse.json({ error: 'Server configuration error (regions missing)' }, { status: 500 });
   }
 
   try {
-     // JSON文字列をパースしてオブジェクトに変換
      regionConfig = JSON.parse(regionsJsonString);
      console.log('Region Config:', JSON.stringify(regionConfig));
    } catch (e) {
      console.error("Failed to parse REGIONS_JSON:", e);
-     // パースに失敗した場合もサーバーエラー
      return NextResponse.json({ error: 'Server configuration error (regions invalid)' }, { status: 500 });
    }
 
-  // --- リクエストされたリージョンに対応するインスタンスドメインを取得 ---
+  // --- インスタンスリストの取得と検証 ---
   const instancesString: string | undefined = regionConfig[region];
 
   if (instancesString === undefined || instancesString === null || instancesString === '') {
       console.error(`No instances configured or empty string for region: ${region}`);
-      // リージョン定義が見つからないか空の場合は 404 Not Found を返す
       return NextResponse.json({ error: `No instances configured for region: ${region}` }, { status: 404 });
   }
-
-  // カンマ区切りのドメイン文字列を配列に変換し、前後の空白を除去、空の要素を除外
-  const instanceDomains: string[] = instancesString.split(',')
-                                      .map(domain => domain.trim())
-                                      .filter(Boolean);
-
+  const instanceDomains: string[] = instancesString.split(',').map(domain => domain.trim()).filter(Boolean);
   if (instanceDomains.length === 0) {
-    // 有効なドメインが見つからなかった場合は 400 Bad Request を返す
     return NextResponse.json({ error: `No valid instances found for region: ${region}` }, { status: 400 });
   }
   console.log(`Target instance domains for ${region}:`, instanceDomains);
 
 
-  // --- KVキャッシュの確認 (将来的に実装する場合) ---
-  // const kv = context?.env?.TIMELINE_CACHE; // Pages Runtime Context から KV を取得する方法 (要調査)
+  // --- KV キャッシュ確認 (コメントアウト中) ---
+  // const kv = context?.env?.TIMELINE_CACHE;
   // const cacheKey = `timeline:${region}:notranslation`;
-  // if (kv) {
-  //   try {
-  //     const cachedData = await kv.get(cacheKey);
-  //     if (cachedData) {
-  //        console.log(`Cache hit for ${region}`);
-  //        return new Response(cachedData, { headers: { 'Content-Type': 'application/json', 'X-Cache-Status': 'HIT' } });
-  //      }
-  //     console.log(`Cache miss for ${region}`);
-  //   } catch (e) { console.error("KV read error:", e); }
-  // } else { console.warn("KV binding 'TIMELINE_CACHE' not available or context structure incorrect"); }
+  // ... (キャッシュ読み取りロジック) ...
 
 
-  // --- 各インスタンスから公開タイムラインを並行して取得 ---
+  // --- Mastodon API 呼び出し ---
   const fetchPromises: Promise<MastodonStatus[]>[] = instanceDomains.map(async (domain: string): Promise<MastodonStatus[]> => {
-    // Mastodon API v1 の公開タイムラインエンドポイント (ローカル)
     const url = `https://${domain}/api/v1/timelines/public?limit=20&local=true`;
-    console.log(`Fetching from: ${url}`); // FetchするURLをログ出力
-
+    console.log(`Fetching from: ${url}`);
     try {
-      // fetch API でデータを取得
-      const response = await fetch(url, {
-          headers: { 'Accept': 'application/json' },
-          // 必要であれば AbortController でタイムアウトを設定
-      });
-
-      // レスポンスステータスが OK (2xx) でない場合はエラーとして扱う
+      const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
       if (!response.ok) {
         console.error(`Failed to fetch from ${domain}: ${response.status} ${response.statusText}`);
-        // エラー内容をテキストで取得してみる（デバッグ用）
-        // const errorText = await response.text().catch(() => 'Could not read error text');
-        // console.error(`Error body from ${domain}: ${errorText}`);
-        return []; // エラー時は空配列を返す
+        return [];
       }
-
-      // レスポンスの Content-Type が JSON であることを確認
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
           console.error(`Received non-JSON response from ${domain}: ${contentType}`);
-          // JSONでない場合はエラーとして扱う
-          // const responseText = await response.text().catch(() => 'Could not read response text');
-          // console.error(`Non-JSON response body from ${domain}: ${responseText}`);
-          return []; // エラー時は空配列を返す
+          return [];
       }
-
-      // JSON をパースし、型アサーションを行う (より安全にするには zod などでバリデーション推奨)
       const statuses = await response.json() as MastodonStatus[];
-      // 各ステータスに取得元のインスタンスドメインを追加
       return statuses.map(status => ({ ...status, instance_domain: domain }));
-
     } catch (error) {
-      // fetch 自体のエラー (ネットワークエラーなど)
       console.error(`Error fetching from ${domain}:`, error);
-      return []; // エラー時は空配列を返す
+      return []; // catch ブロックで return []
     }
   });
 
-  // --- 全てのインスタンスからの取得結果を統合・整形 ---
+  // --- 結果の集計と整形 ---
   let combinedStatuses: MastodonStatus[] = [];
   try {
-      // Promise.all で全ての fetch Promise の完了を待つ
       const results = await Promise.all(fetchPromises);
-      // 結果の配列 (MastodonStatus[][]) をフラットな配列 (MastodonStatus[]) に変換
       combinedStatuses = results.flat();
-      // 作成日時 (created_at) の降順 (新しい順) にソート
       combinedStatuses.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      // 結果を最大50件に制限
       combinedStatuses = combinedStatuses.slice(0, 50);
       console.log(`Fetched ${combinedStatuses.length} statuses for region ${region}`);
   } catch (error) {
-      // Promise.all や sort, slice でエラーが発生した場合
       console.error('Error processing fetch results:', error);
       return NextResponse.json({ error: 'Failed to process fetch results' }, { status: 500 });
   }
 
-  // --- KVキャッシュへの書き込み (将来的に実装する場合) ---
+  // --- 感情分析処理 ---
+  let sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+  let totalAnalyzed = 0;
+  const sentimentResults: any[] = []; // デバッグ用
+
+  // --- Workers AI へのアクセス方法 (要調査・修正) ---
+  // Cloudflare Pages Runtime Context から 'AI' binding を取得する必要がある可能性が高い
+  // const ai = context?.env?.AI;
+  // process.env.AI は通常オブジェクトを直接は保持しない
+  // ここではダミーとして null を設定しておく
+  const ai: any = null; // ★★★ Cloudflare Pages Runtime での正しい AI Binding アクセス方法に修正が必要 ★★★
+  // if (!ai) { console.warn("AI binding not available in this context."); }
+
+  if (ai && combinedStatuses.length > 0) {
+      const model = '@cf/huggingface/distilbert-sst-2-int8'; // 使用するモデル
+
+      const analysisPromises = combinedStatuses.map(async (status) => {
+          const textToAnalyze = stripHtml(status.content);
+          if (textToAnalyze.length < 10 || textToAnalyze.length > 500) { return null; }
+          try {
+              const inputs: AiTextClassificationInput = { text: textToAnalyze };
+              // ★★★ 正しい AI オブジェクトを使って run を呼び出す ★★★
+              const result: AiTextClassificationOutput[] = await ai.run(model, inputs);
+
+              if (result && result.length > 0) {
+                  const topResult = result.reduce((prev, current) => (prev.score > current.score) ? prev : current);
+                  sentimentResults.push({ id: status.id, label: topResult.label, score: topResult.score });
+
+                  const label = topResult.label.toUpperCase();
+                   if (label.includes("POSITIVE") || label === 'LABEL_1') { return 'positive'; }
+                   else if (label.includes("NEGATIVE") || label === 'LABEL_0') { return 'negative'; }
+                   else { return 'neutral'; }
+              }
+          } catch (aiError) { console.error(`AI analysis error for status ${status.id}:`, aiError); }
+          return null;
+      });
+
+      const analysisResults = await Promise.all(analysisPromises);
+      analysisResults.forEach(resultLabel => {
+          if (resultLabel) {
+              sentimentCounts[resultLabel as keyof typeof sentimentCounts]++;
+              totalAnalyzed++;
+          }
+      });
+      console.log(`Sentiment analysis complete for ${region}. Analyzed: ${totalAnalyzed}, Counts:`, sentimentCounts);
+      console.log("Sample AI results:", sentimentResults.slice(0, 5));
+  } else {
+      console.warn("AI binding not available or no statuses to analyze.");
+  }
+
+  // --- 集計結果を計算 ---
+  const sentimentAnalysis: SentimentAnalysisData = {
+      positivePercentage: totalAnalyzed > 0 ? Math.round((sentimentCounts.positive / totalAnalyzed) * 100) : 0,
+      negativePercentage: totalAnalyzed > 0 ? Math.round((sentimentCounts.negative / totalAnalyzed) * 100) : 0,
+      neutralPercentage: totalAnalyzed > 0 ? Math.round((sentimentCounts.neutral / totalAnalyzed) * 100) : 0,
+      totalAnalyzed: totalAnalyzed,
+      counts: sentimentCounts
+  };
+
+
+  // --- KVキャッシュへの書き込み (コメントアウト中) ---
+  // const kv = context?.env?.TIMELINE_CACHE;
   // if (kv && combinedStatuses.length > 0) {
-  //    const responseBody = JSON.stringify(combinedStatuses);
+  //    const responseBody = JSON.stringify({ timeline: combinedStatuses, sentimentAnalysis }); // レスポンス全体をキャッシュ
   //    context?.waitUntil(kv.put(cacheKey, responseBody, { expirationTtl: 300 }).catch(e => console.error("KV write error:", e)));
-  //    console.log(`Attempted to cache ${combinedStatuses.length} statuses for region ${region}`);
   // }
 
   // --- 最終的な結果を JSON レスポンスとして返す ---
-  return NextResponse.json(combinedStatuses);
+  const responsePayload: ApiResponse = {
+      timeline: combinedStatuses,
+      sentimentAnalysis: sentimentAnalysis
+  };
+
+  return NextResponse.json(responsePayload);
 }
