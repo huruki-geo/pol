@@ -51,9 +51,14 @@ export default function HomePage() {
 
       const data: MastodonStatus[] = await response.json();
       setTimeline(data);
-    } catch (err: any) {
+    } catch (err: unknown) { // <-- any を unknown に変更
       console.error('Fetch error:', err);
-      setError(err.message || 'An error occurred while fetching data.');
+      // err が Error インスタンスかチェックしてから message プロパティにアクセスする
+      if (err instanceof Error) {
+        setError(err.message || 'An error occurred while fetching data.');
+      } else {
+        setError('An unknown error occurred while fetching data.');
+      }
     } finally {
       setLoading(false);
     }
