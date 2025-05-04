@@ -99,11 +99,15 @@ export async function GET(
   request: NextRequest,
   // context の型は Next.js + Cloudflare Pages Runtime の仕様に依存
   // ここでは分割代入を使い、型チェックは内部で行う
-  { params }: { params: { region: string } }
+  context: any
   // context?: ExecutionContext // 必要に応じて ExecutionContext を受け取る (要調査)
 ) {
-  const region = params.region.toUpperCase();
-  console.log(`API Route requested region: ${region}`);
+  if (!context || typeof context !== 'object' || !context.params || typeof context.params !== 'object' || typeof context.params.region !== 'string') {
+    console.error("Invalid context or params:", context);
+    return NextResponse.json({ error: "Invalid request context or region parameter" }, { status: 400 });
+ }
+ const region = context.params.region.toUpperCase();
+ console.log(`API Route requested region: ${region}`);
 
   // --- 環境変数 (Regions JSON) の取得と検証 ---
   const regionsJsonString = process.env.REGIONS_JSON;
