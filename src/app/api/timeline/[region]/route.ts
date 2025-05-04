@@ -190,12 +190,11 @@ export async function GET(
 
   // --- Workers AI へのアクセス方法 (要調査・修正) ---
   // Cloudflare Pages Runtime Context から 'AI' binding を取得する必要がある可能性が高い
-  // const ai = context?.env?.AI;
+  const ai = context?.env?.AI;
   // process.env.AI は通常オブジェクトを直接は保持しない
   // ここではダミーとして null を設定しておく
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ai: any = null; // ★★★ Cloudflare Pages Runtime での正しい AI Binding アクセス方法に修正が必要 ★★★
-  // if (!ai) { console.warn("AI binding not available in this context."); }
+  if (!ai) { console.warn("AI binding not available in this context."); }
 
   if (ai && combinedStatuses.length > 0) {
       const model = '@cf/huggingface/distilbert-sst-2-int8'; // 使用するモデル
