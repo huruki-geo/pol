@@ -19,11 +19,11 @@ interface MastodonStatus {
 }
 
 // HTMLサニタイズ関数（必要なら）
-const sanitizeHtml = (html: string): string => {
-    let text = html.replace(/<p>/gi, '').replace(/<\/p>/gi, '\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, ' ');
-    text = text.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, "'");
-    return text.replace(/\s+/g, ' ').trim();
-};
+//const sanitizeHtml = (html: string): string => {
+//    let text = html.replace(/<p>/gi, '').replace(/<\/p>/gi, '\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, ' ');
+//    text = text.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, "'");
+//    return text.replace(/\s+/g, ' ').trim();
+//};
 
 
 export async function GET(
