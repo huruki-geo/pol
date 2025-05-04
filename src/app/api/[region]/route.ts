@@ -32,11 +32,14 @@ interface MastodonStatus {
  */
 export async function GET(
     request: NextRequest,
-    // 2番目の引数の型注釈を削除し、分割代入で params を取り出す
-    { params }: { params: { region: string } }
+    context: any // ★★★ 2番目の引数の型を一時的に 'any' にしてみる ★★★
   ) {
-    // params.region でアクセスできる
-    const region = params.region.toUpperCase();
+    // ★★★ context.params にアクセスする前に存在確認を追加 ★★★
+    if (!context || !context.params || typeof context.params.region !== 'string') {
+        console.error("Invalid context or params received:", context);
+        return NextResponse.json({ error: 'Invalid request context' }, { status: 400 });
+    }
+    const region = context.params.region.toUpperCase();
     console.log(`API Route requested region: ${region}`);
 
   // --- 環境変数からリージョンごとのインスタンス設定 (JSON文字列) を取得 ---
