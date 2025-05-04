@@ -92,7 +92,6 @@ export default function HomePage() {
       setLoadingRegions(false);
     }
   // selectedRegion を依存配列に含め、初期選択ロジックが正しく動作するようにする
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRegion]); // selectedRegion が変更された場合も再評価（ただし通常は初回のみ）
 
 
@@ -121,7 +120,8 @@ export default function HomePage() {
             if (typeof errorData === 'object' && errorData !== null && 'error' in errorData && typeof errorData.error === 'string') {
                 errorMessage = errorData.error; // APIからのエラーメッセージを採用
             }
-        } catch (jsonError) { /* ignore json parse error, use status text */ }
+        } catch (_jsonError) { /* ignore json parse error, use status text */ }
+        console.error("Failed to parse timeline error response as JSON:");
         throw new Error(errorMessage);
       }
 

@@ -179,15 +179,17 @@ export async function GET(
   }
 
   // --- 感情分析処理 ---
-  let sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+  const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
   let totalAnalyzed = 0;
-  const sentimentResults: any[] = []; // デバッグ用
+  interface SentimentResultDebug { id: string; label: string; score: number; }
+  const sentimentResults: SentimentResultDebug[] = [];
 
   // --- Workers AI へのアクセス方法 (要調査・修正) ---
   // Cloudflare Pages Runtime Context から 'AI' binding を取得する必要がある可能性が高い
   // const ai = context?.env?.AI;
   // process.env.AI は通常オブジェクトを直接は保持しない
   // ここではダミーとして null を設定しておく
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ai: any = null; // ★★★ Cloudflare Pages Runtime での正しい AI Binding アクセス方法に修正が必要 ★★★
   // if (!ai) { console.warn("AI binding not available in this context."); }
 
