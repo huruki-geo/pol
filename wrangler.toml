@@ -3,6 +3,7 @@ name = "pol" # あなたのプロジェクト名に合わせる
 compatibility_date = "2023-11-21" # wrangler suggest-compat-date で推奨される日付を確認
 [build]
 pages_build_output_dir = "./out" # Example for Next.js static export or other frameworks
+upload.format = "service-worker"
 
 # KV Namespace Binding (重要: IDを自分のものに置き換える)
 [[kv_namespaces]]
