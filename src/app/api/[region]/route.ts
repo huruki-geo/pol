@@ -21,11 +21,11 @@ interface MastodonStatus {
  * Next.js App Router の Route Handler が受け取るコンテキストの型定義。
  * 動的ルートパラメータ `region` を含みます。
  */
-interface TimelineContext {
-  params: {
-    region: string;
-  }
-}
+//interface TimelineContext {
+//  params: {
+//    region: string;
+//  }
+//}
 
 /**
  * 指定された地域の Mastodon 公開タイムラインを取得する API ルートハンドラ (GET)。
