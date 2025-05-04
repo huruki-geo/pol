@@ -1,69 +1,85 @@
 // src/app/api/timeline/[region]/route.ts
+
 import { type NextRequest, NextResponse } from 'next/server';
 
-// KVへのアクセス方法の調査が必要なため、型定義は一旦コメントアウト
-// interface Env {
-//   TIMELINE_CACHE: KVNamespace;
-// }
-
-// MastodonStatusの型定義（必要に応じて調整）
+/**
+ * Mastodon のステータス（トゥート）を表す型定義。
+ * API レスポンスに合わせて調整してください。
+ */
 interface MastodonStatus {
-	id: string;
-	created_at: string;
-	content: string; // HTML content
-	url: string;
-	account: {
-		acct: string;
-	};
-	instance_domain?: string;
+    id: string;
+    created_at: string; // ISO 8601 形式の文字列
+    content: string;    // HTML 形式のコンテンツ文字列
+    url: string;        // Mastodon上の投稿へのURL
+    account: {
+        acct: string;   // ユーザーアカウント (例: user@instance.domain)
+    };
+    instance_domain?: string; // どのインスタンスからの投稿かを示すドメイン (後で追加)
 }
 
-// HTMLサニタイズ関数（必要なら）
-//const sanitizeHtml = (html: string): string => {
-//    let text = html.replace(/<p>/gi, '').replace(/<\/p>/gi, '\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, ' ');
-//    text = text.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, "'");
-//    return text.replace(/\s+/g, ' ').trim();
-//};
+/**
+ * Next.js App Router の Route Handler が受け取るコンテキストの型定義。
+ * 動的ルートパラメータ `region` を含みます。
+ */
+interface TimelineContext {
+  params: {
+    region: string;
+  }
+}
 
-
+/**
+ * 指定された地域の Mastodon 公開タイムラインを取得する API ルートハンドラ (GET)。
+ */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { region: string } }
-  // context?: ExecutionContext & { env: Env } // KV等を使う場合はContextの受け取り方が必要
+  context: TimelineContext
 ) {
-  const region = params.region.toUpperCase();
+  const region = context.params.region.toUpperCase();
   console.log(`API Route requested region: ${region}`);
 
-  // --- 環境変数から Regions JSON を取得 ---
-  const regionsJsonString = process.env.REGIONS_JSON;
+  // --- 環境変数からリージョンごとのインスタンス設定 (JSON文字列) を取得 ---
+  const regionsJsonString = process.env.REGIONS_JSON; // Cloudflare Pages ダッシュボードで設定
   let regionConfig: Record<string, string> = {};
-  if (regionsJsonString) {
-     try {
-       regionConfig = JSON.parse(regionsJsonString);
-       console.log('Region Config from process.env.REGIONS_JSON:', JSON.stringify(regionConfig));
-     } catch (e) {
-        console.error("Failed to parse REGIONS_JSON:", e);
-        return NextResponse.json({ error: 'Server config error (regions invalid)' }, { status: 500 });
-     }
-  } else {
-     console.error("Environment variable REGIONS_JSON is not set.");
-     return NextResponse.json({ error: 'Server config error (regions missing)' }, { status: 500 });
+
+  if (typeof regionsJsonString !== 'string' || regionsJsonString === '') {
+     console.error("Environment variable REGIONS_JSON is not set or empty.");
+     // 設定が見つからない場合はサーバーエラーを返す
+     return NextResponse.json({ error: 'Server configuration error (regions missing)' }, { status: 500 });
   }
 
-  // --- 対象リージョンのインスタンスリストを取得 ---
-  const instancesString = regionConfig[region];
-  if (!instancesString) {
-      console.error(`No instances configured for region: ${region}`);
-      // リージョン定義が見つからない場合は404を返す
+  try {
+     // JSON文字列をパースしてオブジェクトに変換
+     regionConfig = JSON.parse(regionsJsonString);
+     console.log('Region Config:', JSON.stringify(regionConfig));
+   } catch (e) {
+     console.error("Failed to parse REGIONS_JSON:", e);
+     // パースに失敗した場合もサーバーエラー
+     return NextResponse.json({ error: 'Server configuration error (regions invalid)' }, { status: 500 });
+   }
+
+  // --- リクエストされたリージョンに対応するインスタンスドメインを取得 ---
+  const instancesString: string | undefined = regionConfig[region];
+
+  if (instancesString === undefined || instancesString === null || instancesString === '') {
+      console.error(`No instances configured or empty string for region: ${region}`);
+      // リージョン定義が見つからないか空の場合は 404 Not Found を返す
       return NextResponse.json({ error: `No instances configured for region: ${region}` }, { status: 404 });
   }
-  const instanceDomains = instancesString.split(',').map(domain => domain.trim()).filter(Boolean);
+
+  // カンマ区切りのドメイン文字列を配列に変換し、前後の空白を除去、空の要素を除外
+  const instanceDomains: string[] = instancesString.split(',')
+                                      .map(domain => domain.trim())
+                                      .filter(Boolean);
+
   if (instanceDomains.length === 0) {
+    // 有効なドメインが見つからなかった場合は 400 Bad Request を返す
     return NextResponse.json({ error: `No valid instances found for region: ${region}` }, { status: 400 });
   }
+  console.log(`Target instance domains for ${region}:`, instanceDomains);
 
-  // --- KV キャッシュ確認 (一旦コメントアウト) ---
-  // const kv = context?.env.TIMELINE_CACHE;
+
+  // --- KVキャッシュの確認 (将来的に実装する場合) ---
+  // const kv = context?.env?.TIMELINE_CACHE; // Pages Runtime Context から KV を取得する方法 (要調査)
   // const cacheKey = `timeline:${region}:notranslation`;
   // if (kv) {
   //   try {
@@ -74,52 +90,78 @@ export async function GET(
   //      }
   //     console.log(`Cache miss for ${region}`);
   //   } catch (e) { console.error("KV read error:", e); }
-  // } else { console.warn("KV binding 'TIMELINE_CACHE' not available"); }
+  // } else { console.warn("KV binding 'TIMELINE_CACHE' not available or context structure incorrect"); }
 
 
-  // --- Mastodon API 呼び出し ---
-  const fetchPromises: Promise<MastodonStatus[]>[] = instanceDomains.map(async (domain) => {
+  // --- 各インスタンスから公開タイムラインを並行して取得 ---
+  const fetchPromises: Promise<MastodonStatus[]>[] = instanceDomains.map(async (domain: string): Promise<MastodonStatus[]> => {
+    // Mastodon API v1 の公開タイムラインエンドポイント (ローカル)
     const url = `https://${domain}/api/v1/timelines/public?limit=20&local=true`;
+    console.log(`Fetching from: ${url}`); // FetchするURLをログ出力
+
     try {
-      const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      // fetch API でデータを取得
+      const response = await fetch(url, {
+          headers: { 'Accept': 'application/json' },
+          // 必要であれば AbortController でタイムアウトを設定
+      });
+
+      // レスポンスステータスが OK (2xx) でない場合はエラーとして扱う
       if (!response.ok) {
-        console.error(`Failed to fetch from ${domain}: ${response.status}`);
-        return [];
+        console.error(`Failed to fetch from ${domain}: ${response.status} ${response.statusText}`);
+        // エラー内容をテキストで取得してみる（デバッグ用）
+        // const errorText = await response.text().catch(() => 'Could not read error text');
+        // console.error(`Error body from ${domain}: ${errorText}`);
+        return []; // エラー時は空配列を返す
       }
-      // レスポンスがJSON形式か確認
+
+      // レスポンスの Content-Type が JSON であることを確認
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
           console.error(`Received non-JSON response from ${domain}: ${contentType}`);
-          return [];
+          // JSONでない場合はエラーとして扱う
+          // const responseText = await response.text().catch(() => 'Could not read response text');
+          // console.error(`Non-JSON response body from ${domain}: ${responseText}`);
+          return []; // エラー時は空配列を返す
       }
+
+      // JSON をパースし、型アサーションを行う (より安全にするには zod などでバリデーション推奨)
       const statuses = await response.json() as MastodonStatus[];
+      // 各ステータスに取得元のインスタンスドメインを追加
       return statuses.map(status => ({ ...status, instance_domain: domain }));
+
     } catch (error) {
+      // fetch 自体のエラー (ネットワークエラーなど)
       console.error(`Error fetching from ${domain}:`, error);
-      return [];
+      return []; // エラー時は空配列を返す
     }
   });
 
-  // --- 結果の集計と整形 ---
-  let combinedStatuses: MastodonStatus[] = []; // ここで定義！
+  // --- 全てのインスタンスからの取得結果を統合・整形 ---
+  let combinedStatuses: MastodonStatus[] = [];
   try {
+      // Promise.all で全ての fetch Promise の完了を待つ
       const results = await Promise.all(fetchPromises);
+      // 結果の配列 (MastodonStatus[][]) をフラットな配列 (MastodonStatus[]) に変換
       combinedStatuses = results.flat();
+      // 作成日時 (created_at) の降順 (新しい順) にソート
       combinedStatuses.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      combinedStatuses = combinedStatuses.slice(0, 50); // 取得件数を制限
+      // 結果を最大50件に制限
+      combinedStatuses = combinedStatuses.slice(0, 50);
       console.log(`Fetched ${combinedStatuses.length} statuses for region ${region}`);
   } catch (error) {
+      // Promise.all や sort, slice でエラーが発生した場合
       console.error('Error processing fetch results:', error);
       return NextResponse.json({ error: 'Failed to process fetch results' }, { status: 500 });
   }
 
-
-  // --- KV キャッシュへの書き込み (一旦コメントアウト) ---
+  // --- KVキャッシュへの書き込み (将来的に実装する場合) ---
   // if (kv && combinedStatuses.length > 0) {
   //    const responseBody = JSON.stringify(combinedStatuses);
   //    context?.waitUntil(kv.put(cacheKey, responseBody, { expirationTtl: 300 }).catch(e => console.error("KV write error:", e)));
+  //    console.log(`Attempted to cache ${combinedStatuses.length} statuses for region ${region}`);
   // }
 
-  // --- 結果を JSON で返す ---
+  // --- 最終的な結果を JSON レスポンスとして返す ---
   return NextResponse.json(combinedStatuses);
 }
