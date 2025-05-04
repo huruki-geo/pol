@@ -32,6 +32,7 @@ interface MastodonStatus {
  */
 export async function GET(
     request: NextRequest,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     context: any // ★★★ 2番目の引数の型を一時的に 'any' にしてみる ★★★
   ) {
     // ★★★ context.params にアクセスする前に存在確認を追加 ★★★
