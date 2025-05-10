@@ -64,10 +64,21 @@ export const runtime = 'edge'; // Edge Runtime で実行することを指定
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { region: string } }
+  context: any
   // context?: ExecutionContext // KVなど Pages Function Context が必要な場合
 ) {
-  const region = params.region.toUpperCase();
+  if (
+    !context ||
+    typeof context !== 'object' ||
+    !context.params ||
+    typeof context.params !== 'object' ||
+    typeof context.params.region !== 'string'
+  ) {
+    console.error("Invalid context or params object received:", context);
+    return NextResponse.json({ error: "Invalid request parameters" }, { status: 400 });
+  }
+
+  const region = context.params.region.toUpperCase();
   console.log(`API Route /api/timeline/${region} called`);
 
   // --- 環境変数 (Regions JSON) の取得と検証 ---
