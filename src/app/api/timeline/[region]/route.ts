@@ -77,11 +77,12 @@ export const runtime = 'edge'; // Cloudflare Edge Runtime で実行すること�
 // KVやwaitUntilを使う場合は、適切な型で context を受け取る必要がある。
 // 例: context: EventContext<Env, string, Record<string, unknown>> (Envはバインディング型)
 export async function GET(
-  request: NextRequest,
-  { params }: { params: { region: string } }
-  // context?: ExecutionContext & { env: { TIMELINE_CACHE?: KVNamespace } } // KVを使う場合の例
+  request: NextRequest
 ) {
-  const region = params.region.toUpperCase();
+  const url = new URL(request.url);
+  const segments = url.pathname.split('/');
+  const region = segments[segments.indexOf('timeline') + 1]?.toUpperCase();
+
   console.log(`API Route /api/timeline/${region} called`);
 
   // --- 1. 環境変数 (Regions JSON) の取得と検証 ---
