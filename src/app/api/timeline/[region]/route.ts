@@ -1,21 +1,24 @@
 // src/app/api/timeline/[region]/route.ts
 
 import { type NextRequest, NextResponse } from 'next/server';
+// KVやwaitUntilを使う場合は、@cloudflare/workers-types から型をインポートすると良いでしょう
+// import type { KVNamespace, ExecutionContext } from '@cloudflare/workers-types';
 
 // --- 型定義 ---
 
 /**
  * Mastodon のステータス（トゥート）を表す型定義。
+ * API レスポンスに合わせて調整してください。
  */
 interface MastodonStatus {
     id: string;
-    created_at: string;
-    content: string;
-    url: string;
+    created_at: string; // ISO 8601 形式の文字列
+    content: string;    // HTML 形式のコンテンツ文字列
+    url: string;        // Mastodon上の投稿へのURL
     account: {
-        acct: string;
+        acct: string;   // ユーザーアカウント (例: user@instance.domain)
     };
-    instance_domain?: string;
+    instance_domain?: string; // どのインスタンスからの投稿かを示すドメイン (後で追加)
 }
 
 /**
@@ -32,140 +35,146 @@ interface SentimentAnalysisData {
 /**
  * このAPIルートのレスポンス全体の型。
  */
-interface ApiResponse {
+interface TimelineApiResponse {
     timeline: MastodonStatus[];
     sentimentAnalysis: SentimentAnalysisData;
 }
 
 /**
- * /api/analyze-sentiment から返されるレスポンスの期待される型。
+ * /api/analyze-sentiment Pages Function から返されるレスポンスの期待される型。
  */
-interface AnalyzeSentimentApiResponse {
-    sentimentResults: ({ originalText: string; label: string; score: number } | null)[];
+interface AnalyzeSentimentFunctionResponse {
+    sentimentResults: ({
+        originalTextIndex: number; // 元のテキスト配列のインデックスを保持する場合
+        label: string;             // 例: "POSITIVE", "NEGATIVE", "LABEL_0", "LABEL_1"
+        score: number;             // 信頼度スコア
+    } | null)[]; // エラーや分析対象外の場合は null を含む配列
 }
 
 
 // --- ヘルパー関数 ---
 
 /**
- * HTML タグを除去する簡単な関数。
+ * HTML タグを除去し、基本的なエンティティをデコードする簡単な関数。
  */
 const stripHtml = (html: string): string => {
     if (!html) return '';
+    // <p> と <br> をスペースに置換
     let text = html.replace(/<p>/gi, ' ').replace(/<br\s*\/?>/gi, ' ');
+    // 残りのHTMLタグを除去
     text = text.replace(/<[^>]*>/g, '');
+    // 基本的なHTMLエンティティをデコード
     text = text.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, "'");
+    // 連続するスペースを一つにまとめ、前後の空白をトリム
     return text.replace(/\s+/g, ' ').trim();
 };
 
 // --- API ルートハンドラ ---
 
-export const runtime = 'edge'; // Edge Runtime で実行することを指定
+export const runtime = 'edge'; // Cloudflare Edge Runtime で実行することを指定
 
+// GET関数の型定義。第2引数はNext.js App Routerの規約に従う。
+// KVやwaitUntilを使う場合は、適切な型で context を受け取る必要がある。
+// 例: context: EventContext<Env, string, Record<string, unknown>> (Envはバインディング型)
 export async function GET(
   request: NextRequest,
-  context: any
-  // context?: ExecutionContext // KVなど Pages Function Context が必要な場合
+  { params }: { params: { region: string } }
+  // context?: ExecutionContext & { env: { TIMELINE_CACHE?: KVNamespace } } // KVを使う場合の例
 ) {
-  if (
-    !context ||
-    typeof context !== 'object' ||
-    !context.params ||
-    typeof context.params !== 'object' ||
-    typeof context.params.region !== 'string'
-  ) {
-    console.error("Invalid context or params object received:", context);
-    return NextResponse.json({ error: "Invalid request parameters" }, { status: 400 });
-  }
-
-  const region = context.params.region.toUpperCase();
+  const region = params.region.toUpperCase();
   console.log(`API Route /api/timeline/${region} called`);
 
-  // --- 環境変数 (Regions JSON) の取得と検証 ---
-  const regionsJsonString = process.env.REGIONS_JSON;
+  // --- 1. 環境変数 (Regions JSON) の取得と検証 ---
+  const regionsJsonString = process.env.REGIONS_JSON; // Cloudflare Pagesの環境変数
   let regionConfig: Record<string, string> = {};
 
   if (typeof regionsJsonString !== 'string' || regionsJsonString === '') {
-     console.error("Environment variable REGIONS_JSON is not set or empty.");
-     return NextResponse.json({ error: 'Server configuration error (regions missing)' }, { status: 500 });
+     console.error(`[${region}] Environment variable REGIONS_JSON is not set or empty.`);
+     return NextResponse.json({ error: 'Server configuration error: REGIONS_JSON missing or empty' }, { status: 500 });
   }
 
   try {
      regionConfig = JSON.parse(regionsJsonString);
-     console.log('Region Config loaded:', JSON.stringify(regionConfig).substring(0, 100) + "..."); // 長すぎる場合は一部表示
+     console.log(`[${region}] Region Config loaded: ${Object.keys(regionConfig).join(', ')}`);
    } catch (e) {
-     console.error("Failed to parse REGIONS_JSON:", e);
-     return NextResponse.json({ error: 'Server configuration error (regions invalid)' }, { status: 500 });
+     console.error(`[${region}] Failed to parse REGIONS_JSON:`, e);
+     return NextResponse.json({ error: 'Server configuration error: REGIONS_JSON invalid format' }, { status: 500 });
    }
 
-  // --- インスタンスリストの取得と検証 ---
+  // --- 2. インスタンスリストの取得と検証 ---
   const instancesString: string | undefined = regionConfig[region];
 
   if (instancesString === undefined || instancesString === null || instancesString === '') {
-      console.error(`No instances configured or empty string for region: ${region}`);
+      console.error(`[${region}] No instances configured or empty string for region.`);
       return NextResponse.json({ error: `No instances configured for region: ${region}` }, { status: 404 });
   }
-  const instanceDomains: string[] = instancesString.split(',').map(domain => domain.trim()).filter(Boolean);
+  const instanceDomains: string[] = instancesString.split(',')
+                                      .map(domain => domain.trim())
+                                      .filter(Boolean); // 空のドメインを除外
   if (instanceDomains.length === 0) {
+    console.error(`[${region}] No valid instance domains found after parsing.`);
     return NextResponse.json({ error: `No valid instances found for region: ${region}` }, { status: 400 });
   }
-  console.log(`Target instance domains for ${region}:`, instanceDomains);
+  console.log(`[${region}] Target instance domains:`, instanceDomains);
 
 
-  // --- KVキャッシュ確認 (実装する場合はここにロジック追加) ---
+  // --- 3. KVキャッシュ確認 (将来的に実装する場合) ---
   // const kv = context?.env?.TIMELINE_CACHE;
-  // const cacheKey = `timeline-response:${region}`; // キャッシュキーにレスポンス全体を含むことを示す
+  // const cacheKey = `timeline-response:${region}`;
   // if (kv) {
   //   try {
   //     const cachedDataString = await kv.get(cacheKey);
   //     if (cachedDataString) {
-  //        console.log(`Cache hit for ${region} response`);
-  //        const cachedResponse: ApiResponse = JSON.parse(cachedDataString);
+  //        console.log(`[${region}] Cache hit for response.`);
+  //        const cachedResponse: TimelineApiResponse = JSON.parse(cachedDataString);
   //        return NextResponse.json(cachedResponse);
   //      }
-  //     console.log(`Cache miss for ${region} response`);
-  //   } catch (e) { console.error("KV Cache read error:", e); }
+  //     console.log(`[${region}] Cache miss for response.`);
+  //   } catch (e) { console.error(`[${region}] KV Cache read error:`, e); }
   // }
 
 
-  // --- Mastodon API 呼び出し ---
+  // --- 4. Mastodon API から投稿データを取得 ---
   const fetchPromises: Promise<MastodonStatus[]>[] = instanceDomains.map(async (domain: string): Promise<MastodonStatus[]> => {
     const url = `https://${domain}/api/v1/timelines/public?limit=20&local=true`;
-    console.log(`Fetching from Mastodon API: ${url}`);
+    console.log(`[${region}] Fetching from Mastodon API: ${url}`);
     try {
-      const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      const response = await fetch(url, {
+          headers: { 'Accept': 'application/json' },
+          // AbortController for timeout (optional but recommended for external API calls)
+          // signal: AbortSignal.timeout(5000) // e.g., 5 seconds timeout
+      });
       if (!response.ok) {
-        console.error(`Failed to fetch from ${domain}: ${response.status} ${response.statusText}`);
+        console.error(`[${region}] Failed to fetch from ${domain}: ${response.status} ${response.statusText}`);
         return [];
       }
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
-          console.error(`Received non-JSON response from ${domain}: ${contentType}`);
+          console.error(`[${region}] Received non-JSON response from ${domain}: ${contentType}`);
           return [];
       }
       const statuses = await response.json() as MastodonStatus[];
       return statuses.map(status => ({ ...status, instance_domain: domain }));
     } catch (error) {
-      console.error(`Error fetching from ${domain}:`, error);
+      console.error(`[${region}] Network or other error fetching from ${domain}:`, error);
       return [];
     }
   });
 
-  // --- 結果の集計と整形 ---
+  // --- 5. 取得した投稿データの集計と整形 ---
   let combinedStatuses: MastodonStatus[] = [];
   try {
       const results = await Promise.all(fetchPromises);
       combinedStatuses = results.flat();
       combinedStatuses.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      combinedStatuses = combinedStatuses.slice(0, 50); // 分析対象も最大50件
-      console.log(`Fetched ${combinedStatuses.length} statuses for region ${region}`);
+      combinedStatuses = combinedStatuses.slice(0, 50); // 最大50件に制限
+      console.log(`[${region}] Fetched ${combinedStatuses.length} statuses in total.`);
   } catch (error) {
-      console.error('Error processing Mastodon API fetch results:', error);
-      // この時点でエラーなら、感情分析は行わずにエラーを返すか、空の分析結果で続行
+      console.error(`[${region}] Error processing Mastodon API fetch results:`, error);
       return NextResponse.json({ error: 'Failed to process Mastodon API results' }, { status: 500 });
   }
 
-  // --- 感情分析処理 (別の Pages Function を呼び出す) ---
+  // --- 6. 感情分析 (別の Pages Function を呼び出す) ---
   let sentimentAnalysis: SentimentAnalysisData = { // デフォルト/エラー時の値
       positivePercentage: 0, negativePercentage: 0, neutralPercentage: 0,
       totalAnalyzed: 0, counts: { positive: 0, negative: 0, neutral: 0 }
@@ -174,11 +183,12 @@ export async function GET(
   if (combinedStatuses.length > 0) {
       try {
           const textsToAnalyze = combinedStatuses.map(status => stripHtml(status.content));
-          // 現在のリクエストURLをベースに、sentiment API の絶対URLを構築
-          const baseAnalyzeApiUrl = new URL(request.url); // 現在のリクエストURLを取得
-          const analyzeApiUrl = `${baseAnalyzeApiUrl.origin}/api/analyze-sentiment`; // オリジン + パス
 
-          console.log(`Calling sentiment analysis API: ${analyzeApiUrl}`);
+          // 現在のリクエストURLのオリジンを元に、analyze-sentiment APIの絶対URLを構築
+          const baseAnalyzeApiUrl = new URL(request.url);
+          const analyzeApiUrl = `${baseAnalyzeApiUrl.origin}/api/analyze-sentiment`;
+
+          console.log(`[${region}] Calling sentiment analysis Function: ${analyzeApiUrl} with ${textsToAnalyze.length} texts.`);
 
           const analyzeResponse = await fetch(analyzeApiUrl, {
               method: 'POST',
@@ -187,24 +197,27 @@ export async function GET(
           });
 
           if (!analyzeResponse.ok) {
-              console.error(`Sentiment analysis API call failed: ${analyzeResponse.status} ${analyzeResponse.statusText}`);
-              const errorBody = await analyzeResponse.text().catch(() => 'Could not read sentiment API error body');
-              console.error(`Sentiment API error body: ${errorBody}`);
+              console.error(`[${region}] Sentiment analysis Function call failed: ${analyzeResponse.status} ${analyzeResponse.statusText}`);
+              const errorBody = await analyzeResponse.text().catch(() => 'Could not read error from sentiment Function');
+              console.error(`[${region}] Sentiment Function error body: ${errorBody}`);
               // エラー時はデフォルトの sentimentAnalysis を使用 (上で初期化済み)
           } else {
-              const analyzeResult = await analyzeResponse.json() as AnalyzeSentimentApiResponse;
+              const analyzeResult = await analyzeResponse.json() as AnalyzeSentimentFunctionResponse;
+              console.log(`[${region}] Received from sentiment Function: ${analyzeResult?.sentimentResults?.length ?? 0} results.`);
 
               let sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
               let totalAnalyzed = 0;
-              analyzeResult.sentimentResults.forEach(res => {
-                  if (res) {
-                      const label = res.label.toUpperCase();
-                      if (label.includes("POSITIVE") || label === 'LABEL_1') sentimentCounts.positive++;
-                      else if (label.includes("NEGATIVE") || label === 'LABEL_0') sentimentCounts.negative++;
-                      else sentimentCounts.neutral++;
-                      totalAnalyzed++;
-                  }
-              });
+              if (analyzeResult && Array.isArray(analyzeResult.sentimentResults)) {
+                  analyzeResult.sentimentResults.forEach(res => {
+                      if (res) { // null でない結果のみ処理
+                          const label = res.label.toUpperCase();
+                          if (label.includes("POSITIVE") || label === 'LABEL_1') sentimentCounts.positive++;
+                          else if (label.includes("NEGATIVE") || label === 'LABEL_0') sentimentCounts.negative++;
+                          else sentimentCounts.neutral++;
+                          totalAnalyzed++;
+                      }
+                  });
+              }
 
               sentimentAnalysis = {
                   positivePercentage: totalAnalyzed > 0 ? Math.round((sentimentCounts.positive / totalAnalyzed) * 100) : 0,
@@ -213,29 +226,31 @@ export async function GET(
                   totalAnalyzed: totalAnalyzed,
                   counts: sentimentCounts
               };
-              console.log("Sentiment analysis successful via API call:", sentimentAnalysis);
+              console.log(`[${region}] Sentiment analysis aggregation successful:`, sentimentAnalysis);
           }
       } catch (e) {
-          console.error("Error calling or processing sentiment analysis API:", e);
-          // エラー時はデフォルトの sentimentAnalysis を使用 (上で初期化済み)
+          console.error(`[${region}] Error calling or processing result from sentiment analysis Function:`, e);
+          // エラー時はデフォルトの sentimentAnalysis を使用
       }
   } else {
-      console.log("No statuses fetched, skipping sentiment analysis.");
+      console.log(`[${region}] No statuses fetched for timeline, skipping sentiment analysis.`);
   }
 
-  // --- KVキャッシュへの書き込み (実装する場合はここにロジック追加) ---
+  // --- 7. KVキャッシュへの書き込み (将来的に実装する場合) ---
+  // const kv = context?.env?.TIMELINE_CACHE;
   // if (kv) {
-  //    const responsePayloadToCache: ApiResponse = { timeline: combinedStatuses, sentimentAnalysis };
+  //    const responsePayloadToCache: TimelineApiResponse = { timeline: combinedStatuses, sentimentAnalysis };
   //    const responseBodyToCache = JSON.stringify(responsePayloadToCache);
-  //    context?.waitUntil(kv.put(cacheKey, responseBodyToCache, { expirationTtl: 300 }).catch(e => console.error("KV write error:", e)));
-  //    console.log(`Attempted to cache response for region ${region}`);
+  //    // context?.waitUntil(kv.put(cacheKey, responseBodyToCache, { expirationTtl: 300 })...);
+  //    // console.log(`[${region}] Attempted to cache response.`);
   // }
 
-  // --- 最終的な結果を JSON レスポンスとして返す ---
-  const responsePayload: ApiResponse = {
+  // --- 8. 最終的なレスポンスを返す ---
+  const responsePayload: TimelineApiResponse = {
       timeline: combinedStatuses,
       sentimentAnalysis: sentimentAnalysis
   };
 
+  console.log(`[${region}] Sending response with ${combinedStatuses.length} timeline items and sentiment.`);
   return NextResponse.json(responsePayload);
 }
