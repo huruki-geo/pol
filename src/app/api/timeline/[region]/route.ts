@@ -1,28 +1,28 @@
 // src/app/api/timeline/[region]/route.ts
 
 import { type NextRequest, NextResponse } from 'next/server';
+
+// Cloudflare のランタイムコンテキストを取得するためのヘルパー
+// ★★★ インポートパスは @cloudflare/next-on-pages のバージョンやドキュメントで要確認 ★★★
+import { getRequestContext } from '@cloudflare/next-on-pages';
+// import { getContext } from '@cloudflare/next-on-pages'; // こちらの可能性も？
+
 // Cloudflare Workers の型 (サービスバインディングやKV、waitUntilで必要)
 import type { Fetcher, KVNamespace, ExecutionContext } from '@cloudflare/workers-types';
 
 // --- 型定義 ---
 
-/**
- * Mastodon のステータス（トゥート）を表す型定義。
- */
+/** Mastodon のステータス（トゥート）を表す型 */
 interface MastodonStatus {
     id: string;
     created_at: string;
     content: string;
     url: string;
-    account: {
-        acct: string;
-    };
+    account: { acct: string; };
     instance_domain?: string;
 }
 
-/**
- * 感情分析の集計結果の型。
- */
+/** 感情分析の集計結果の型 */
 interface SentimentAnalysisData {
     positivePercentage: number;
     negativePercentage: number;
@@ -31,17 +31,13 @@ interface SentimentAnalysisData {
     counts: { positive: number; negative: number; neutral: number };
 }
 
-/**
- * このAPIルートのレスポンス全体の型。
- */
+/** このAPIルートのレスポンス全体の型 */
 interface TimelineApiResponse {
     timeline: MastodonStatus[];
     sentimentAnalysis: SentimentAnalysisData;
 }
 
-/**
- * AI分析サービス (pol-ai-analyzer Worker) から返されるレスポンスの期待される型。
- */
+/** AI分析サービス (pol-ai-analyzer Worker) から返されるレスポンスの期待される型 */
 interface AnalyzeSentimentServiceResponse {
     sentimentResults: ({
         originalTextIndex: number;
@@ -50,16 +46,12 @@ interface AnalyzeSentimentServiceResponse {
     } | null)[];
 }
 
-/**
- * この Route Handler が期待する環境変数とバインディングの型。
- * Next.js App Router と @cloudflare/next-on-pages の組み合わせで、
- * context.env にバインディングが渡されることを仮定しています。
- * 正確な型やアクセス方法はドキュメントで確認してください。
- */
-interface RouteHandlerEnv {
-    REGIONS_JSON?: string;         // 通常の環境変数 (process.env でもアクセス可能)
+/** Cloudflare の env オブジェクトの型定義 (バインディングを含む) */
+interface CloudflareEnv {
+    REGIONS_JSON?: string;         // 通常の環境変数
     AI_ANALYZER_SERVICE?: Fetcher; // サービスバインディング
     TIMELINE_CACHE?: KVNamespace;  // KV バインディング
+    // 他のバインディング (D1, R2 など)
 }
 
 // --- ヘルパー関数 ---
@@ -72,28 +64,47 @@ const stripHtml = (html: string): string => {
 };
 
 // --- API ルートハンドラ ---
-export const runtime = 'edge';
+export const runtime = 'edge'; // Edge Runtime で実行
 
 export async function GET(
-  request: NextRequest,
-  // context の型は実行環境に依存。Cloudflare Pages の場合、env や waitUntil を含むことがある。
-  // 分割代入で params を取り出し、context 全体も受け取る。
-  context: { params: { region: string }; env?: RouteHandlerEnv; waitUntil?: ExecutionContext['waitUntil'] }
+  request: NextRequest, // Next.js が提供するリクエストオブジェクト
+  // Next.js App Router の context は params を含む
+  contextFromNext: { params: { region: string } }
 ) {
-  const region = context.params.region.toUpperCase();
-  console.log(`API Route /api/timeline/${region} called`);
+  const region = contextFromNext.params.region.toUpperCase();
+  console.log(`API Route /api/timeline/${region} called. URL: ${request.url}`);
 
-  // バインディングと環境変数を取得
-  // process.env はビルド時の環境変数、context.env はランタイムバインディング
-  const regionsJsonString = process.env.REGIONS_JSON; // REGIONS_JSON はビルド時でもランタイムでもOK
-  const aiAnalyzerService = context.env?.AI_ANALYZER_SERVICE;
-  const kv = context.env?.TIMELINE_CACHE;
-  const waitUntil = context.waitUntil;
+  // --- Cloudflare のランタイムコンテキストを取得 ---
+  let env: CloudflareEnv = {} as CloudflareEnv;
+  let waitUntil: ExecutionContext['waitUntil'] | undefined;
+
+  try {
+    // getRequestContext はリクエストスコープ外で呼び出す必要があるかもしれない (ドキュメント確認)
+    // もしリクエストスコープ内で呼ぶなら、try-catch で囲む
+    const cfRuntimeContext = getRequestContext();
+    if (cfRuntimeContext && cfRuntimeContext.env) {
+      env = cfRuntimeContext.env as CloudflareEnv; // 型アサーション
+      waitUntil = cfRuntimeContext.waitUntil;
+      console.log(`[${region}] Cloudflare runtime context obtained. AI Service available: ${!!env.AI_ANALYZER_SERVICE}, KV available: ${!!env.TIMELINE_CACHE}`);
+    } else {
+      console.warn(`[${region}] Cloudflare context or env not available via getRequestContext. Falling back to process.env for REGIONS_JSON.`);
+    }
+  } catch (e) {
+    console.error(`[${region}] Error obtaining Cloudflare context with getRequestContext:`, e);
+    // エラー時も process.env.REGIONS_JSON は試みる
+  }
+  // REGIONS_JSON は process.env からも取得試行 (ビルド時環境変数として)
+  if (!env.REGIONS_JSON && process.env.REGIONS_JSON) {
+      env.REGIONS_JSON = process.env.REGIONS_JSON;
+      console.log(`[${region}] REGIONS_JSON obtained from process.env.`);
+  }
+
 
   // --- 1. 環境変数 (Regions JSON) の取得と検証 ---
+  const regionsJsonString = env.REGIONS_JSON;
   let regionConfig: Record<string, string> = {};
   if (typeof regionsJsonString !== 'string' || regionsJsonString === '') {
-     console.error(`[${region}] Environment variable REGIONS_JSON is not set or empty.`);
+     console.error(`[${region}] Environment variable REGIONS_JSON is not set or empty (checked context.env and process.env).`);
      return NextResponse.json({ error: 'Server configuration error: REGIONS_JSON missing or empty' }, { status: 500 });
   }
   try {
@@ -110,49 +121,31 @@ export async function GET(
       console.error(`[${region}] No instances configured or empty string for region.`);
       return NextResponse.json({ error: `No instances configured for region: ${region}` }, { status: 404 });
   }
-  const instanceDomains: string[] = instancesString.split(',').map(d => d.trim()).filter(Boolean);
+  const instanceDomains: string[] = instancesString.split(',').map(d=>d.trim()).filter(Boolean);
   if (instanceDomains.length === 0) {
     console.error(`[${region}] No valid instance domains found after parsing.`);
     return NextResponse.json({ error: `No valid instances found for region: ${region}` }, { status: 400 });
   }
   console.log(`[${region}] Target instance domains:`, instanceDomains);
 
-  // --- 3. KVキャッシュ確認 (実装する場合) ---
+  // --- 3. KVキャッシュ確認 ---
+  const kv = env.TIMELINE_CACHE; // getRequestContext から取得した env を使用
   const cacheKey = `timeline-response:${region}`;
   if (kv) {
     try {
       const cachedDataString = await kv.get(cacheKey);
       if (cachedDataString) {
-         console.log(`[${region}] Cache hit for response.`);
+         console.log(`[${region}] Cache hit for response (key: ${cacheKey}).`);
          const cachedResponse: TimelineApiResponse = JSON.parse(cachedDataString);
          return NextResponse.json(cachedResponse);
        }
-      console.log(`[${region}] Cache miss for response.`);
+      console.log(`[${region}] Cache miss for response (key: ${cacheKey}).`);
     } catch (e) { console.error(`[${region}] KV Cache read error:`, e); }
+  } else {
+    console.warn(`[${region}] TIMELINE_CACHE binding not available in env.`);
   }
 
   // --- 4. Mastodon API から投稿データを取得 ---
-   const fetchPromises: Promise<MastodonStatus[]>[] = instanceDomains.map(async (domain: string): Promise<MastodonStatus[]> => {
-    const url = `https://${domain}/api/v1/timelines/public?limit=20&local=true`;
-    console.log(`[${region}] Fetching from Mastodon API: ${url}`);
-    try {
-      const response = await fetch(url, { headers: { 'Accept': 'application/json' }});
-      if (!response.ok) {
-        console.error(`[${region}] Failed to fetch from ${domain}: ${response.status} ${response.statusText}`);
-        return []; // エラー時は空配列
-      }
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-          console.error(`[${region}] Received non-JSON response from ${domain}: ${contentType}`);
-          return []; // JSONでない場合も空配列
-      }
-      const statuses = await response.json() as MastodonStatus[];
-      return statuses.map(status => ({ ...status, instance_domain: domain }));
-    } catch (error) {
-      console.error(`[${region}] Network or other error fetching from ${domain}:`, error);
-      return []; // catch ブロックでも空配列
-    }
-  });
   let combinedStatuses: MastodonStatus[] = [];
   try {
     const results = await Promise.all(instanceDomains.map(async (domain: string): Promise<MastodonStatus[]> => {
@@ -183,23 +176,18 @@ export async function GET(
       return NextResponse.json({ error: 'Failed to process Mastodon API results' }, { status: 500 });
   }
 
-  // --- 5. 感情分析 (サービスバインディング経由で AI Worker を呼び出す) ---
+  // --- 5. 感情分析 (サービスバインディング経由) ---
   let sentimentAnalysis: SentimentAnalysisData = {
       positivePercentage: 0, negativePercentage: 0, neutralPercentage: 0,
       totalAnalyzed: 0, counts: { positive: 0, negative: 0, neutral: 0 }
   };
+  const aiAnalyzerService = env.AI_ANALYZER_SERVICE; // getRequestContext から取得した env を使用
 
   if (aiAnalyzerService && combinedStatuses.length > 0) {
       try {
           const textsToAnalyze = combinedStatuses.map(status => stripHtml(status.content));
-          console.log(`[${region}] Calling AI Analyzer Service with ${textsToAnalyze.length} texts.`);
+          console.log(`[${region}] Calling AI Analyzer Service via binding with ${textsToAnalyze.length} texts.`);
 
-          // サービスバインディングを使って他の Worker を呼び出す
-          // サービスバインディングでは、第1引数はリクエスト先の Worker のURLではなく、
-          // サービスバインディング名（ここでは aiAnalyzerService）が指すサービスへのリクエストになる。
-          // fetchの第1引数は、リクエスト先のWorkerがどのようにパスを解釈するかに依存するが、
-          // 通常はダミーのパスや、リクエスト元のURLを渡すことが多い。
-          // ここでは、リクエストオブジェクトを直接渡すか、新しいリクエストを作成する。
           const analyzeApiUrl = new URL(request.url).origin + "/ai-analyze-service-dummy-path"; // パスはサービス側で無視されることが多い
 const analyzeResponse = await aiAnalyzerService.fetch(
     analyzeApiUrl, // 第1引数: URL文字列
@@ -212,11 +200,11 @@ const analyzeResponse = await aiAnalyzerService.fetch(
 
           if (!analyzeResponse.ok) {
               console.error(`[${region}] AI Analyzer Service call failed: ${analyzeResponse.status} ${analyzeResponse.statusText}`);
-              const errorBody = await analyzeResponse.text().catch(() => 'Could not read error from AI service');
+              const errorBody = await analyzeResponse.text().catch(() => `Could not read error body from AI service. Status: ${analyzeResponse.status}`);
               console.error(`[${region}] AI Analyzer Service error body: ${errorBody}`);
           } else {
               const analyzeResult = await analyzeResponse.json() as AnalyzeSentimentServiceResponse;
-              console.log(`[${region}] Received from AI Analyzer Service: ${analyzeResult?.sentimentResults?.length ?? 0} results.`);
+              console.log(`[${region}] Received from AI Analyzer Service: ${analyzeResult?.sentimentResults?.filter(r=>r!==null).length ?? 0} valid results.`);
 
               let sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
               let totalAnalyzed = 0;
@@ -245,24 +233,29 @@ const analyzeResponse = await aiAnalyzerService.fetch(
       }
   } else {
       if (!aiAnalyzerService) {
-          console.warn(`[${region}] AI Analyzer Service binding (AI_ANALYZER_SERVICE) not available.`);
+          console.warn(`[${region}] AI Analyzer Service binding (AI_ANALYZER_SERVICE) not available in env.`);
       }
       if (combinedStatuses.length === 0) {
           console.log(`[${region}] No statuses fetched, skipping sentiment analysis.`);
       }
   }
 
-  // --- 6. KVキャッシュへの書き込み (実装する場合) ---
+  // --- 6. KVキャッシュへの書き込み ---
   const responsePayload: TimelineApiResponse = {
       timeline: combinedStatuses,
       sentimentAnalysis: sentimentAnalysis
   };
-  if (kv && waitUntil) {
+  if (kv && waitUntil) { // getRequestContext から取得した kv と waitUntil を使用
      const responseBodyToCache = JSON.stringify(responsePayload);
-     waitUntil(kv.put(cacheKey, responseBodyToCache, { expirationTtl: 300 }) // 5分キャッシュ
-         .then(() => console.log(`[${region}] Response cached.`))
-         .catch(e => console.error(`[${region}] KV Cache write error:`, e))
+     // waitUntil で非同期に実行 (レスポンスをブロックしない)
+     waitUntil(
+         kv.put(cacheKey, responseBodyToCache, { expirationTtl: 300 }) // 5分キャッシュ
+             .then(() => console.log(`[${region}] Response for key ${cacheKey} cached successfully.`))
+             .catch(e => console.error(`[${region}] KV Cache (key: ${cacheKey}) write error:`, e))
      );
+  } else {
+      if (!kv) console.warn(`[${region}] TIMELINE_CACHE binding not available for caching.`);
+      if (!waitUntil) console.warn(`[${region}] waitUntil not available for caching.`);
   }
 
   // --- 7. 最終的なレスポンスを返す ---
