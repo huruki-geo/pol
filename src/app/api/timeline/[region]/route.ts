@@ -69,9 +69,9 @@ export const runtime = 'edge'; // Edge Runtime で実行
 export async function GET(
   request: NextRequest, // Next.js が提供するリクエストオブジェクト
   // Next.js App Router の context は params を含む
-  contextFromNext: { params: { region: string } }
+  { params }: { params: { region: string } } 
 ) {
-  const region = contextFromNext.params.region.toUpperCase();
+  const region = params.region;
   console.log(`API Route /api/timeline/${region} called. URL: ${request.url}`);
 
   // --- Cloudflare のランタイムコンテキストを取得 ---
