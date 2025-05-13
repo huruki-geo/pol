@@ -67,11 +67,10 @@ const stripHtml = (html: string): string => {
 export const runtime = 'edge'; // Edge Runtime で実行
 
 export async function GET(
-  request: NextRequest, // Next.js が提供するリクエストオブジェクト
-  // Next.js App Router の context は params を含む
-  { params }: { params: { region: string } } 
+  request: NextRequest
 ) {
-  const region = params.region;
+   const { searchParams, pathname } = new URL(request.url);
+  const region = pathname.split('/')[3]; 
   console.log(`API Route /api/timeline/${region} called. URL: ${request.url}`);
 
   // --- Cloudflare のランタイムコンテキストを取得 ---
