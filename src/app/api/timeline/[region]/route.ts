@@ -84,7 +84,7 @@ export async function GET(
     const cfRuntimeContext = getRequestContext();
     if (cfRuntimeContext && cfRuntimeContext.env) {
       env = cfRuntimeContext.env as CloudflareEnv; // 型アサーション
-      waitUntil = cfRuntimeContext.waitUntil;
+      waitUntil = cfRuntimeContext.ctx.waitUntil;
       console.log(`[${region}] Cloudflare runtime context obtained. AI Service available: ${!!env.AI_ANALYZER_SERVICE}, KV available: ${!!env.TIMELINE_CACHE}`);
     } else {
       console.warn(`[${region}] Cloudflare context or env not available via getRequestContext. Falling back to process.env for REGIONS_JSON.`);
